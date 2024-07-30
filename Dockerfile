@@ -1,24 +1,41 @@
-FROM quay.io/opendatahub/text-generation-inference:fast-ec05689
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest as poetry-builder
 
-USER root
+RUN microdnf -y update && \
+    microdnf -y install \
+        git shadow-utils python3.11-pip python-wheel && \
+    pip3.11 install --no-cache-dir --upgrade pip wheel && \
+    microdnf clean all
+
+ENV POETRY_VIRTUALENVS_IN_PROJECT=1
 
 WORKDIR /caikit
-COPY caikit /caikit
+COPY pyproject.toml .
+COPY poetry.lock .
+RUN pip3.11 install poetry && poetry install --no-root
 
-RUN yum -y install git git-lfs && yum clean all && \
-    git lfs install && \
-    pip install pipenv && \
-    pipenv install --system && \
-    rm -rf ~/.cache && \
-    mkdir -p /opt/models && \
-    adduser -g 0 -u 1001 caikit --home-dir /caikit && \
-    chown -R 1001:0 /caikit /opt/models && \
-    chmod -R g=u /caikit /opt/models
 
-USER 1001
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest as deploy
+RUN microdnf -y update && \
+    microdnf -y install \
+        shadow-utils python3.11 && \
+    microdnf clean all
 
-ENV TRANSFORMERS_CACHE="/tmp/transformers_cache" \
-    RUNTIME_LIBRARY='caikit_nlp' \
-    RUNTIME_LOCAL_MODELS_DIR='/opt/models'
+WORKDIR /caikit
 
-CMD [ "./start-serving.sh" ]
+COPY --from=poetry-builder /caikit/.venv /caikit/.venv
+COPY caikit.yml /caikit/config/caikit.yml
+
+ENV VIRTUAL_ENV=/caikit/.venv
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+RUN groupadd --system caikit --gid 1001 && \
+    adduser --system --uid 1001 --gid 0 --groups caikit \
+    --create-home --home-dir /caikit --shell /sbin/nologin \
+    --comment "Caikit User" caikit
+
+USER caikit
+
+ENV CONFIG_FILES=/caikit/config/caikit.yml
+VOLUME ["/caikit/config/"]
+
+CMD ["python",  "-m", "caikit.runtime"]
